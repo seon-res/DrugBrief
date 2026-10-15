@@ -30,6 +30,10 @@ UTC = timezone.utc
 KST = timezone(timedelta(hours=9))
 UA = 'DrugBrief-Research-Dashboard/1.0 (public regulatory data; educational use)'
 FDA_API = 'https://api.fda.gov/drug/drugsfda.json'
+FDA_LABEL_API = 'https://api.fda.gov/drug/label.json'
+# To avoid exhausting the unauthenticated openFDA daily quota, expand label coverage
+# across scheduled executions. Each entry still receives a factual summary immediately.
+FDA_LABEL_MAX_PER_RUN = 200
 CT_API = 'https://clinicaltrials.gov/api/v2/studies'
 FR_API = 'https://www.federalregister.gov/api/v1/documents.json'
 EMA_FEEDS = [
@@ -89,6 +93,10 @@ def http_get(url, params=None, timeout=25, attempts=3):
 
 
 def api_json(url, params=None):
+    params = dict(params or {})
+    api_key = os.environ.get('OPENFDA_API_KEY', '').strip()
+    if api_key and url.startswith('https://api.fda.gov/'):
+        params['api_key'] = api_key
     return json.loads(http_get(url, params))
 
 
@@ -116,16 +124,118 @@ def original_letter_link(submission):
     return ''
 
 
-def approval_reason_fallback(record):
-    """Structured facts, not an inferred scientific/regulatory rationale."""
-    cls = str(record.get('classification') or '').strip()
-    form = str(record.get('dosage_form') or '').strip()
-    details = []
-    if cls:
-        details.append(f'FDA 제출 분류: {cls}')
+def short_facts_summary(row):
+    """Distinct Korean summary for EVERY approval, using only application facts.
+
+    Never claim a therapeutic indication or regulatory motive from the product
+    name/classification alone. Those need an FDA letter or an FDA drug label.
+    """
+    title = str(row.get('title') or row.get('application') or '해당 의약품').strip()
+    kind = '생물학적 제제(BLA)' if str(row.get('application') or '').startswith('BLA') else '의약품(NDA)'
+    company = str(row.get('company') or '').strip()
+    ingredient = str(row.get('subtitle') or '').strip()
+    form = str(row.get('dosage_form') or '').strip()
+    cls = str(row.get('classification') or '').strip()
+    details=[]
+    if ingredient and ingredient != '성분명 미기재':
+        details.append(f'주성분은 {ingredient}')
     if form:
-        details.append(f'허가 제품 제형: {form}')
-    return '. '.join(details) + ('. ' if details else '') + '구체적인 승인 대상·변경 내용은 FDA 원허가 승인서 확인이 필요합니다.'
+        details.append(f'제형은 {form}')
+    parts=[f'FDA는 {title}의 {kind} 원허가 신청을 승인했습니다.']
+    if details:
+        parts.append(', '.join(details) + '입니다.')
+    if company:
+        parts.append(f'신청 업체는 {company}입니다.')
+    if cls:
+        parts.append(f'FDA 제출 분류는 {cls}입니다.')
+    parts.append('구체적인 최초 승인 대상·적응증은 공식 승인서 또는 허가사항을 추가 확인해야 합니다.')
+    return ' '.join(parts)
+
+
+def approval_reason_fallback(record):
+    """Compatibility alias for the default fact-based approval overview."""
+    return short_facts_summary(record)
+
+
+def clean_indication_text(value, max_chars=430):
+    """Remove SPL markup / section numbers, keep a SHORT, attributable excerpt.
+
+    The excerpt comes from CURRENT labeling and is explicitly not a synopsis
+    of the indications at the historic date of original NDA/BLA approval.
+    """
+    if isinstance(value, list):
+        value = ' '.join(str(x) for x in value[:2])
+    text = unescape(re.sub(r'<[^>]*>', ' ', str(value or '')))
+    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r'^(?:\d+(?:\.\d+)*\s*)?INDICATIONS\s+AND\s+USAGE\s*', '', text, flags=re.I)
+    text = re.sub(r'^\d+(?:\.\d+)*\s+', '', text)
+    if not text:
+        return ''
+    # Strip common SPL section headers before indication sentences.
+    m = re.search(r'\b(?:is|are)\s+indicated\s+for\b', text, re.I)
+    if m and m.start() < 220:
+        # Keep drug identity to make the sentence interpretable.
+        left = text[max(0, text.rfind('.', 0, m.start()) + 1):]
+        if left.strip():
+            text = left.strip()
+    text = re.split(r'\s+(?:2\s+DOSAGE|CONTRAINDICATIONS|WARNINGS\s+AND\s+PRECAUTIONS)\b', text, maxsplit=1, flags=re.I)[0].strip()
+    if len(text) > max_chars:
+        clipped = text[:max_chars]
+        # Don't break mid-token.
+        clipped = clipped.rsplit(' ', 1)[0] if ' ' in clipped else clipped
+        text = clipped.rstrip(' .;:') + '…'
+    return text
+
+
+def fetch_current_label(application, expected_brand=''):
+    """Get the indication section from an application-matched openFDA label.
+
+    The label may have changed AFTER original approval. Cross-check returned
+    application identifiers to prevent linking a different product's labeling.
+    """
+    app = str(application or '').upper().replace(' ', '')
+    if not re.fullmatch(r'(?:NDA|BLA)\d{5,6}', app):
+        return None
+    try:
+        raw = api_json(FDA_LABEL_API, {'search': f'openfda.application_number:"{app}"', 'limit': 5})
+    except RuntimeError as exc:
+        if isinstance(exc.__cause__, HTTPError) and exc.__cause__.code == 404:
+            return None
+        raise
+    results = raw.get('results') or []
+    matching=[]
+    wanted = {re.sub(r'[^a-z0-9]', '', part.lower()) for part in str(expected_brand or '').split(',') if part.strip()}
+    for item in results:
+        identifiers = (item.get('openfda') or {}).get('application_number') or []
+        if isinstance(identifiers, str): identifiers=[identifiers]
+        if app not in {str(x).upper().replace(' ', '') for x in identifiers}:
+            continue
+        reported = (item.get('openfda') or {}).get('brand_name') or []
+        if isinstance(reported, str): reported=[reported]
+        label_brands={re.sub(r'[^a-z0-9]', '', str(b).lower()) for b in reported}
+        # No matching brand -> potentially another product on the same NDA/BLA.
+        if wanted and label_brands and not (wanted & label_brands):
+            continue
+        excerpt = clean_indication_text(item.get('indications_and_usage'))
+        if not excerpt:
+            continue
+        matching.append((str(item.get('effective_time') or ''), item, excerpt))
+    if not matching:
+        return None
+    _, label, excerpt = max(matching, key=lambda x:x[0])
+    set_id = str(label.get('set_id') or '')
+    return {'label_indication':excerpt,
+            'label_date':iso_ymd(label.get('effective_time')),
+            'label_source_url':f'https://dailymed.nlm.nih.gov/dailymed/drugInfo.cfm?setid={set_id}' if re.fullmatch(r'[A-Za-z0-9-]{15,70}',set_id) else '',
+            'label_checked_at':datetime.now(UTC).date().isoformat()}
+
+
+def label_context_summary(row):
+    prefix = short_facts_summary(row).replace(' 구체적인 최초 승인 대상·적응증은 공식 승인서 또는 허가사항을 추가 확인해야 합니다.', '')
+    excerpt = str(row.get('label_indication') or '').strip()
+    if not excerpt:
+        return short_facts_summary(row)
+    return prefix + ' FDA 공개 제품설명서에 기재된 사용 목적(영문): ' + excerpt + ' 이는 최초 승인 당시의 승인 범위와 다를 수 있습니다.'
 
 
 def read_curated_notes():
@@ -198,42 +308,83 @@ def extract_letter_purpose(pdf_url):
         return ''
 
 
-def enrich_approval_reasons(rows, previous=None, max_pdf=12):
-    """Curated FDA-backed notes > previous exact-date explanations > auto extract > pending.
+def enrich_approval_reasons(rows, previous=None, max_pdf=12, label_budget=FDA_LABEL_MAX_PER_RUN):
+    """Provide a distinct description for ALL rows; progressively add FDA labels.
 
-    Never mark an automatically parsed letter as human verified.
+    Reviewed letter > automatically extracted letter > current FDA label plus
+    application facts > application facts alone. Only curated notes are verified.
+    Existing label data is retained over subsequent daily re-fetches.
     """
     notes = read_curated_notes()
     before = {x.get('id'): x for x in (previous or []) if x.get('id')}
-    attempted = 0
+    attempted_pdf, attempted_label, label_disabled = 0, 0, False
+    today = datetime.now(UTC).date()
     for row in rows:
-        if not row.get('application', '').startswith(('NDA', 'BLA')):
-            continue
-        if apply_curated_reason(row, notes):
+        if not str(row.get('application') or '').startswith(('NDA', 'BLA')):
             continue
         old = before.get(row.get('id')) or {}
-        if (old.get('date') == row.get('date') and
-                old.get('reason_status') in ('verified', 'auto_extracted') and
-                old.get('approval_reason') and old.get('reason_source_url')):
+        # Carry forward any prior enrichment for a matching approval date.
+        if old.get('date') == row.get('date'):
+            for field in ('label_indication','label_date','label_source_url',
+                          'label_checked_at','label_lookup_status','letter_checked_at'):
+                if not row.get(field) and old.get(field):
+                    row[field] = old[field]
+        if apply_curated_reason(row, notes):
+            continue
+        if old.get('date') == row.get('date') and old.get('reason_status') in ('verified','auto_extracted') and old.get('approval_reason') and old.get('reason_source_url'):
             for field in ('approval_reason','reason_status','reason_basis','reason_source_url',
                           'reason_verified_at','reason_category'):
-                if field in old:
-                    row[field] = old[field]
+                if old.get(field): row[field]=old[field]
             if not row.get('approval_letter_url'):
                 row['approval_letter_url'] = old.get('approval_letter_url') or ''
             continue
-        letter = row.get('approval_letter_url')
-        if letter and attempted < max_pdf:
-            attempted += 1
-            excerpt = extract_letter_purpose(letter)
-            if excerpt:
-                row.update({'approval_reason':excerpt,'reason_status':'auto_extracted',
-                            'reason_basis':'FDA 승인서 영문 문구 자동 추출 · 해석 검토 필요',
-                            'reason_source_url':letter})
-                continue
-        row.update({'approval_reason':approval_reason_fallback(row),
-                    'reason_status':'pending','reason_basis':'FDA 구조화 데이터 · 승인서 미검토',
-                    'reason_source_url':letter or row.get('url','')})
+        letter = row.get('approval_letter_url') or old.get('approval_letter_url') or ''
+        if letter and attempted_pdf < max_pdf:
+            # Do not download the same unparseable PDF every morning.
+            checked = iso_ymd(row.get('letter_checked_at'))
+            too_recent = bool(checked and (today - datetime.strptime(checked, '%Y-%m-%d').date()).days < 90)
+            if not too_recent:
+                attempted_pdf += 1
+                row['letter_checked_at'] = today.isoformat()
+                excerpt = extract_letter_purpose(letter)
+                if excerpt:
+                    row.update({'approval_reason':excerpt,'reason_status':'auto_extracted',
+                                'reason_basis':'FDA 승인서 영문 발췌 · 해석 검토 필요',
+                                'reason_source_url':letter})
+                    continue
+        if not row.get('label_indication') and not label_disabled and attempted_label < label_budget:
+            checked = iso_ymd(row.get('label_checked_at'))
+            # A product with no searchable label is tried again after 90 days.
+            retry_due = not checked or (today - datetime.strptime(checked,'%Y-%m-%d').date()).days >= 90
+            if retry_due:
+                attempted_label += 1
+                try:
+                    label=fetch_current_label(row.get('application'), row.get('title'))
+                    row['label_checked_at'] = today.isoformat()
+                    if label:
+                        row.update(label)
+                        row['label_lookup_status']='matched'
+                    else:
+                        row['label_lookup_status']='not_found'
+                except Exception as exc:
+                    # A transient rate limit/network error must not consume
+                    # the 90-day negative cache or stop other menu updates.
+                    print('WARN FDA label', row.get('application'), str(exc)[:130],file=sys.stderr)
+                    # Stop calls for this execution after the first remote
+                    # failure to avoid an extended rate-limit retry storm.
+                    label_disabled = True
+        if row.get('label_indication'):
+            row.update({'approval_reason':label_context_summary(row),
+                        'reason_status':'label_context',
+                        'reason_basis':'신청 자료 + 최신 FDA 제품설명서 · 최초 승인 사유와 구분',
+                        'reason_source_url':row.get('label_source_url') or row.get('url') or ''})
+        else:
+            row.update({'approval_reason':short_facts_summary(row),
+                        'reason_status':'basic_facts',
+                        'reason_basis':'FDA NDA/BLA 신청 자료 기반 자동 요약 · 적응증 미확인',
+                        'reason_source_url':letter or row.get('url') or ''})
+    print('ENRICH', 'records',len(rows),'label_api_queries',attempted_label,'letter_attempts',attempted_pdf,
+          'label_summaries',sum(x.get('reason_status')=='label_context' for x in rows),flush=True)
     return rows
 
 
@@ -320,7 +471,8 @@ def fetch_approvals(start_date=FDA_HISTORY_START, now=None):
             query = (f'application_number:{prefix}* AND submissions.submission_type:ORIG '
                      f'AND submissions.submission_status:AP AND submissions.submission_status_date:'
                      f'[{window_start:%Y%m%d} TO {window_end:%Y%m%d}]')
-            limit, skip = 500, 0
+            # Drugs@FDA endpoint permits at most 99 results per request.
+            limit, skip = 99, 0
             while True:
                 try:
                     payload = api_json(FDA_API, {'search':query, 'limit':limit, 'skip':skip})
@@ -504,8 +656,13 @@ def run():
             fresh=func()
             if not fresh: raise RuntimeError('API returned no matching records')
             if key == 'fda':
-                fresh = enrich_approval_reasons(fresh, previous=old)
-            merged=current_snapshot(name,fresh,cap)
+                index = {str(x['id']):x for x in old if x.get('id')}
+                index.update({str(x['id']):x for x in fresh if x.get('id')})
+                merged = sorted(index.values(),key=lambda x:(x.get('date') or '',x.get('id') or ''),reverse=True)
+                enrich_approval_reasons(merged, previous=old)
+                write_json(name, merged)
+            else:
+                merged=current_snapshot(name,fresh,cap)
             status[key]={'state':'ok','last_success':started,'message':'수집 성공','count':len(fresh)}
             counts[key]=len(merged)
             if key == 'fda':
@@ -519,7 +676,7 @@ def run():
             print('OK',key, 'new',len(fresh),'total',len(merged),flush=True)
         except Exception as e:
             if key == 'fda' and old:
-                enrich_approval_reasons(old, previous=old, max_pdf=0)
+                enrich_approval_reasons(old, previous=old, max_pdf=0, label_budget=0)
                 write_json(name, old)
             error = str(e)[:450]
             old_success=(previous.get(key) or {}).get('last_success')

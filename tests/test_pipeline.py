@@ -42,8 +42,8 @@ class PipelineTests(unittest.TestCase):
             self.assertIn('/220290Orig1s000ltr.pdf',row['reason_source_url'])
             wrong={**row,'date':'2026-10-09'}
             wrong.pop('approval_reason',None)
-            update_data.enrich_approval_reasons([wrong],max_pdf=0)
-            self.assertEqual(wrong['reason_status'],'pending')
+            update_data.enrich_approval_reasons([wrong],max_pdf=0,label_budget=0)
+            self.assertEqual(wrong['reason_status'],'basic_facts')
 
     def test_full_backfill_starts_in_2015_and_rescans_monthly(self):
         from datetime import date
@@ -64,8 +64,10 @@ class PipelineTests(unittest.TestCase):
               'submissions':[{'submission_type':'ORIG','submission_status':'AP',
                              'submission_status_date':'20261010','submission_number':'1'}]})
         def response(_url,params):
-            return {'results':applications if 'NDA' in params['search'] else [],
-                    'meta':{'results':{'total':300 if 'NDA' in params['search'] else 0}}}
+            nda = 'NDA' in params['search']
+            page = applications[params['skip']:params['skip']+params['limit']] if nda else []
+            return {'results':page,
+                    'meta':{'results':{'total':300 if nda else 0}}}
         with patch.object(update_data,'api_json',side_effect=response):
             rows=update_data.fetch_approvals('2026-10-01',now=datetime(2026,10,15,tzinfo=timezone.utc))
         self.assertEqual(len(rows),300)
@@ -74,9 +76,9 @@ class PipelineTests(unittest.TestCase):
     def test_unreviewed_record_does_not_claim_letter_verified(self):
         row={'id':'FDA-NDA900900-1','application':'NDA900900','date':'2026-10-02',
              'classification':'Type 5','dosage_form':'TABLET','url':'https://www.accessdata.fda.gov/'}
-        update_data.enrich_approval_reasons([row],max_pdf=0)
-        self.assertEqual(row['reason_status'],'pending')
-        self.assertIn('승인서 확인이 필요합니다',row['approval_reason'])
+        update_data.enrich_approval_reasons([row],max_pdf=0,label_budget=0)
+        self.assertEqual(row['reason_status'],'basic_facts')
+        self.assertIn('추가 확인해야 합니다',row['approval_reason'])
         self.assertNotIn('확인 완료',row['reason_basis'])
 
     def test_original_record_has_document_details(self):
@@ -96,7 +98,64 @@ class PipelineTests(unittest.TestCase):
         with patch.object(update_data,'extract_letter_purpose',return_value='This NDA provides for a new formulation.'):
             update_data.enrich_approval_reasons([row],max_pdf=1)
         self.assertEqual(row['reason_status'],'auto_extracted')
-        self.assertIn('자동 추출',row['reason_basis'])
+        self.assertIn('영문 발췌',row['reason_basis'])
+
+    def test_all_approvals_have_individual_fact_summaries_without_label_api(self):
+        rows=[{'id':'FDA-NDA123450-1','application':'NDA123450','date':'2026-10-01',
+               'title':'Medicine A','subtitle':'SUBSTANCE A','dosage_form':'TABLET',
+               'classification':'Type 1 - New Molecular Entity'},
+              {'id':'FDA-BLA761234-1','application':'BLA761234','date':'2026-09-18',
+               'title':'Medicine B','subtitle':'SUBSTANCE B','dosage_form':'INJECTION',
+               'classification':'Type 5 - New Formulation'}]
+        with patch.object(update_data,'read_curated_notes',return_value={}):
+            update_data.enrich_approval_reasons(rows,max_pdf=0,label_budget=0)
+        self.assertTrue(all(r.get('approval_reason') for r in rows))
+        self.assertIn('SUBSTANCE A',rows[0]['approval_reason'])
+        self.assertIn('SUBSTANCE B',rows[1]['approval_reason'])
+        self.assertIn('Type 5',rows[1]['approval_reason'])
+        self.assertNotEqual(rows[0]['approval_reason'],rows[1]['approval_reason'])
+        self.assertTrue(all(r['reason_status']=='basic_facts' for r in rows))
+
+    def test_label_application_matching_and_short_indication(self):
+        data={'results':[
+            {'openfda':{'application_number':['NDA999999']},'indications_and_usage':['Unrelated indication.']},
+            {'openfda':{'application_number':['NDA123450'], 'brand_name':['MEDICINE A']},
+             'indications_and_usage':['1 INDICATIONS AND USAGE Medicine A is indicated for treatment of a fictional disease in adults.'],
+             'effective_time':'20260718','set_id':'61edc432-1111-2222-3333-abcd23456789'}]}
+        with patch.object(update_data,'api_json',return_value=data):
+            found=update_data.fetch_current_label('NDA123450', 'MEDICINE A')
+        self.assertIn('fictional disease',found['label_indication'])
+        self.assertNotIn('Unrelated',found['label_indication'])
+        self.assertIn('dailymed.nlm.nih.gov',found['label_source_url'])
+        self.assertEqual(found['label_date'],'2026-07-18')
+
+    def test_label_does_not_link_different_brand_same_application(self):
+        wrong={'results':[{'openfda':{'application_number':['NDA123450'],'brand_name':['OTHER DRUG']},
+                           'indications_and_usage':['OTHER DRUG is indicated for disease Y.']}]}
+        with patch.object(update_data,'api_json',return_value=wrong):
+            result=update_data.fetch_current_label('NDA123450','MEDICINE A')
+        self.assertIsNone(result)
+
+    def test_label_context_persists_across_new_fda_record_fetches(self):
+        old={'id':'FDA-NDA123450-1','application':'NDA123450','date':'2025-04-02',
+             'title':'Medicine A','subtitle':'ABC','label_indication':'Medicine A is indicated for Disease X.',
+             'label_checked_at':'2026-10-01','label_date':'2026-09-28',
+             'label_source_url':'https://dailymed.nlm.nih.gov/dailymed/drugInfo.cfm?setid=ab',
+             'reason_status':'label_context'}
+        new={k:v for k,v in old.items() if k not in ('label_indication','label_checked_at','label_source_url','label_date','reason_status')}
+        with patch.object(update_data,'read_curated_notes',return_value={}), patch.object(update_data,'fetch_current_label') as query:
+            update_data.enrich_approval_reasons([new],previous=[old],max_pdf=0,label_budget=200)
+        query.assert_not_called()
+        self.assertEqual(new['reason_status'],'label_context')
+        self.assertIn('Disease X',new['approval_reason'])
+        self.assertIn('최초 승인 당시',new['approval_reason'])
+
+    def test_label_api_not_needed_for_curated_reason(self):
+        row={'id':'FDA-NDA220290-1','application':'NDA220290','date':'2026-10-08','title':'BREZTRI AEROSPHERE'}
+        with patch.object(update_data,'fetch_current_label') as fetch:
+            update_data.enrich_approval_reasons([row],max_pdf=0)
+        fetch.assert_not_called()
+        self.assertEqual(row['reason_status'],'verified')
 
     def test_trials_only_drugs(self):
         raw={'protocolSection':{'identificationModule':{'nctId':'NCT12345678','briefTitle':'Research test'},

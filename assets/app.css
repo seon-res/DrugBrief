@@ -11,3 +11,8 @@
 .approval-reason a{font-weight:700;font-size:11px;text-decoration:none}
 .approval-reason a:hover{text-decoration:underline}
 .detail-modal .approval-reason{margin:16px 0 3px}
+
+/* Additional indication context for every approval (not necessarily original indication) */
+.approval-reason.labeled{background:#eef7ff;border-color:#c9dff4}
+.approval-reason.labeled .approval-basis{background:#dceeff;color:#235d88}
+.record .approval-reason p{line-height:1.75}

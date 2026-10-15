@@ -1,7 +1,7 @@
 /* DrugBrief dashboard — static application, no API credentials in browser. */
 'use strict';
 const TAB_INFO = {
-  approvals:{name:'신규 의약품 허가·FDA 승인',short:'의약품 허가·승인',sub:'NDA / BLA 원허가',icon:'✦',headline:'새롭게 허가된 의약품을 한눈에',desc:'FDA Drugs@FDA 원허가 기록과 승인 내용 요약을 제공합니다. 승인서 확인 완료·자동 발췌·확인 필요를 구분합니다.'},
+  approvals:{name:'신규 의약품 허가·FDA 승인',short:'의약품 허가·승인',sub:'NDA / BLA 원허가',icon:'✦',headline:'새롭게 허가된 의약품을 한눈에',desc:'모든 NDA/BLA 승인 기록에 개별 의약품 설명을 제공합니다. 승인서의 최초 허가 내용과 최신 FDA 제품설명서의 사용 목적은 명확히 구분합니다.'},
   trials:{name:'임상시험 진행 현황',short:'임상시험 현황',sub:'Phase 1 · 2 · 3 · 4',icon:'◈',headline:'글로벌 임상시험 진행 상황 확인',desc:'ClinicalTrials.gov에 등록된 의약품 및 생물학적 제제 중재시험 중 최근 변경된 정보를 제공합니다.'},
   regulations:{name:'제약 규제·가이드라인 변경',short:'규제·가이드라인',sub:'FDA · EMA · 식약처',icon:'▤',headline:'규제와 가이드라인의 변화를 놓치지 마세요',desc:'공식 규제 자료와 업로드된 기존 규제정보 아카이브를 통합해 검색할 수 있습니다.'}
 };
@@ -58,8 +58,8 @@ function statCards(){
   if(table==='approvals'){
     const nda=data.filter(x=>x.approval_type?.includes('NDA')).length;
     const bla=data.filter(x=>x.approval_type?.includes('BLA')).length;
-    const reviewed=data.filter(x=>x.reason_status==='verified').length;
-    return [['기록된 원허가',num(data.length),'현재 수집 목록'],['NDA 원허가',num(nda),'신규 의약품 신청'],['BLA 원허가',num(bla),'바이오의약품 신청'],['승인서 검토 완료',num(reviewed),'원문 근거 확인·한국어 요약']];
+    const described=data.filter(x=>x.approval_reason).length;
+    return [['기록된 원허가',num(data.length),'현재 수집 목록'],['NDA 원허가',num(nda),'신규 의약품 신청'],['BLA 원허가',num(bla),'바이오의약품 신청'],['개별 의약품 설명',num(described),'확인 수준을 구분하여 표시']];
   }
   if(table==='trials'){
     const active=data.filter(x=>['RECRUITING','NOT_YET_RECRUITING'].includes(x.status)).length;
@@ -106,23 +106,29 @@ function statusChip(item){
   }
   return chip(item.is_historical?'과거 스냅샷':item.reg_type||'공식 자료',item.is_historical?'gray':'green');
 }
-function approvalReasonHtml(item){
+function approvalReasonHtml(item, compact=false){
   if(state.tab!=='approvals')return '';
-  const verified=item.reason_status==='verified';
-  const automatic=item.reason_status==='auto_extracted';
-  const basis=verified?'FDA 승인서 확인 완료':automatic?'FDA 승인서 영문 자동 발췌 · 검토 필요':'승인서 내용 미확인';
-  const reason=item.approval_reason||'승인 내용을 확인 중입니다. FDA 원문을 확인하세요.';
+  const status=item.reason_status||'basic_facts';
+  const verified=status==='verified';
+  const automatic=status==='auto_extracted';
+  const label=status==='label_context';
+  const basis=verified?'승인서 확인 완료':automatic?'승인서 자동 발췌 · 검토 전':label?'FDA 제품설명서 적응증 · 최초 승인과 다를 수 있음':'신청자료 기반 설명 · 적응증 미확인';
+  const heading=verified||automatic?'이번 NDA/BLA 승인 내용':label?'의약품 소개 및 공개 제품설명서 적응증':'의약품 개요 및 원허가 분류';
+  const reason=item.approval_reason||[item.title||item.application||'해당 의약품',item.subtitle||'',item.dosage_form||''].filter(Boolean).join(' · ')+' — 개별 승인 범위 확인 전입니다.';
+  const visible=compact && reason.length>255?reason.slice(0,250).trimEnd()+'…':reason;
   const link=safeUrl(item.reason_source_url||item.approval_letter_url||item.url);
-  return `<div class="approval-reason ${verified?'verified':''}"><div class="approval-reason-head"><strong>이번 NDA/BLA의 승인 내용</strong><span class="approval-basis">${esc(basis)}</span></div><p>${esc(reason)}</p>${link?`<a href="${esc(link)}" target="_blank" rel="noopener noreferrer">${verified||automatic?'FDA 승인서 확인 ↗':'FDA 공식 원문 보기 ↗'}</a>`:''}</div>`;
+  const linkText=verified||automatic?'FDA 승인서 원문 ↗':label?'현재 FDA 제품설명서 ↗':'FDA NDA/BLA 신청 기록 ↗';
+  return `<div class="approval-reason ${verified?'verified':''} ${label?'labeled':''}"><div class="approval-reason-head"><strong>${heading}</strong><span class="approval-basis">${basis}</span></div><p>${esc(visible)}</p>${link?`<a href="${esc(link)}" target="_blank" rel="noopener noreferrer">${linkText}</a>`:''}</div>`;
 }
+
 function card(item, idx){
-  const desc=item.subtitle||item.description||'';
+  const desc=state.tab==='approvals'?(item.subtitle||item.dosage_form||''):item.subtitle||item.description||'';
   const meta=state.tab==='approvals'?[item.company,item.application,prettyDate(item.date)]:state.tab==='trials'?[item.id,item.company,prettyDate(item.date)]:[item.reg_type,item.agency,prettyDate(item.date)];
   return `<article class="record">
       <div class="record-number">${String(idx+1).padStart(2,'0')}</div>
       <div><div class="record-top">${groupChip(item)}${statusChip(item)}</div>
       <button class="record-title" data-detail="${esc(item.id)}" type="button">${esc(item.title||'제목 없음')}</button>
-      <p class="record-desc">${esc(desc)}</p>${approvalReasonHtml(item)}
+      <p class="record-desc">${esc(desc)}</p>${approvalReasonHtml(item,true)}
       <div class="record-meta">${meta.filter(Boolean).map(t=>`<span>${esc(t)}</span>`).join('')}</div></div>
     </article>`;
 }
@@ -203,10 +209,11 @@ function changeTab(tab){if(!TAB_INFO[tab])return;state.tab=tab;state.search='';s
 function openModal(id){
   const item=records().find(x=>x.id===id);if(!item)return;
   state.selected=id;
-  const fields=[['자료 번호',item.id],['발표·기록 기관',item.agency],['기관/개발사',item.company],['원문 기준일',prettyDate(item.date)],['날짜 기준',item.date_basis],['자료 유형',item.approval_type||item.phase||item.reg_type],['진행 상태',STATUS_KR[item.status]||item.status],['FDA 신청번호',item.application],['제출 분류',item.classification],['제품 제형',item.dosage_form],['승인 근거 상태',item.reason_basis],['승인 사유 확인일',item.reason_verified_at],['임상시험 최초 게시일',item.first_posted],['등록된 중재물질',item.interventions?.join(' / ')],['목표·예상 등록인원',item.enrollment],['원본 스냅샷 기준일',item.archive_snapshot],['원본 데이터 출처',item.source]];
+  const fields=[['자료 번호',item.id],['발표·기록 기관',item.agency],['기관/개발사',item.company],['원문 기준일',prettyDate(item.date)],['날짜 기준',item.date_basis],['자료 유형',item.approval_type||item.phase||item.reg_type],['진행 상태',STATUS_KR[item.status]||item.status],['FDA 신청번호',item.application],['제출 분류',item.classification],['제품 제형',item.dosage_form],['승인 내용 정보 출처',item.reason_basis],['FDA 현재 제품설명서 날짜',item.label_date],['승인 사유 확인일',item.reason_verified_at],['임상시험 최초 게시일',item.first_posted],['등록된 중재물질',item.interventions?.join(' / ')],['목표·예상 등록인원',item.enrollment],['원본 스냅샷 기준일',item.archive_snapshot],['원본 데이터 출처',item.source]];
   const url=safeUrl(item.url);
+  const intro=state.tab==='approvals'?[item.subtitle,item.dosage_form].filter(Boolean).join(' · '):(item.description||item.subtitle||'원문에서 상세 내용을 확인하세요.');
   const root=$('#modal-root');
-  root.innerHTML=`<div class="modal-overlay" id="modal-backdrop" role="presentation"><section class="detail-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><div>${groupChip(item)} ${statusChip(item)}</div><button class="close" id="close-modal" aria-label="닫기">×</button></div><h2 id="modal-title">${esc(item.title)}</h2><div class="detail-summary">${esc(item.description||item.subtitle||'원문에서 상세 내용을 확인하세요.')}</div>${approvalReasonHtml(item)}<dl class="detail-fields">${fields.filter(([,v])=>v!==null&&v!==undefined&&v!=='').map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${url?`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" class="primary-link">Drugs@FDA 신청 정보 ↗</a>`:''}<p class="disclaimer">본 내용은 공개 자료의 탐색용 요약이며 법적·의료적 판단의 근거로 사용하지 마세요. 발표일, 시행일 및 최신 상태는 출처 원문을 확인해야 합니다.</p></section></div>`;
+  root.innerHTML=`<div class="modal-overlay" id="modal-backdrop" role="presentation"><section class="detail-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><div>${groupChip(item)} ${statusChip(item)}</div><button class="close" id="close-modal" aria-label="닫기">×</button></div><h2 id="modal-title">${esc(item.title)}</h2><div class="detail-summary">${esc(intro)}</div>${approvalReasonHtml(item)}<dl class="detail-fields">${fields.filter(([,v])=>v!==null&&v!==undefined&&v!=='').map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${url?`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" class="primary-link">Drugs@FDA 신청 정보 ↗</a>`:''}<p class="disclaimer">본 내용은 공개 자료의 탐색용 요약이며 법적·의료적 판단의 근거로 사용하지 마세요. 발표일, 시행일 및 최신 상태는 출처 원문을 확인해야 합니다.</p></section></div>`;
   document.body.style.overflow='hidden';
   $('#close-modal')?.focus();
   $('#close-modal')?.addEventListener('click',closeModal);
