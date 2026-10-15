@@ -46,7 +46,7 @@ function statCards(){
     const phase3=data.filter(x=>(x.phase||'').includes('Phase 3')).length;
     return [['조회된 임상시험',num(data.length),'최근 업데이트 샘플'],['모집 중·예정',num(active),'등록된 모집 상태'],['Phase 3',num(phase3),'3상 포함 연구'],['최근 변경 등록일',data[0]?.date||'—','승인일이 아닌 변경 게시일']];
   }
-  return [['규제 관련 기록',num(data.length),state.history?'과거 전체 + 최근':'최근 주요 자료'],['FDA 관련',num(data.filter(x=>x.agency?.includes('FDA'))),'FDA / 연방관보'],['EMA 관련',num(data.filter(x=>x.agency==='EMA')),'유럽 규제 자료'],['식약처 관련',num(data.filter(x=>x.agency==='식약처')),'원본 ZIP 과거 기록']];
+  return [['규제 관련 기록',num(data.length),state.history?'과거 전체 + 최근':'최근 주요 자료'],['FDA 관련',num(data.filter(x=>x.agency?.includes('FDA')).length),'FDA / 연방관보'],['EMA 관련',num(data.filter(x=>x.agency==='EMA').length),'유럽 규제 자료'],['식약처 관련',num(data.filter(x=>x.agency==='식약처').length),'원본 ZIP 과거 기록']];
 }
 function filterOptions(){
   const rows=records();
