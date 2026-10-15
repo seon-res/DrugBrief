@@ -1,0 +1,14 @@
+{
+  "mode": "demo",
+  "updated_at": null,
+  "errors": [],
+  "fda": [
+    {"type":"fda","id":"EXAMPLE-NDA-001","application_number":"EXAMPLE-NDA-001","title":"[가상 예시] 항암제 A","drug":"항암제 A","company":"예시 제약회사","date":"2026-10-10","url":"https://open.fda.gov/apis/drug/drugsfda/"},
+    {"type":"fda","id":"EXAMPLE-BLA-002","application_number":"EXAMPLE-BLA-002","title":"[가상 예시] 생물학적제제 B","drug":"생물학적제제 B","company":"예시 바이오기업","date":"2026-10-04","url":"https://open.fda.gov/apis/drug/drugsfda/"}
+  ],
+  "trials": [
+    {"type":"trial","id":"EXAMPLE-TRIAL-001","title":"[가상 예시] 폐암 환자에서 신약 후보물질 C의 임상시험","drug":"후보물질 C","company":"예시 임상시험 의뢰자","condition":"폐암","status":"RECRUITING","phases":["PHASE2"],"date":"2026-10-12","url":"https://clinicaltrials.gov/"},
+    {"type":"trial","id":"EXAMPLE-TRIAL-002","title":"[가상 예시] 삼중음성유방암 대상 후보물질 D의 3상 연구","drug":"후보물질 D","company":"예시 임상시험 의뢰자","condition":"삼중음성유방암","status":"ACTIVE_NOT_RECRUITING","phases":["PHASE3"],"date":"2026-10-09","url":"https://clinicaltrials.gov/"},
+    {"type":"trial","id":"EXAMPLE-TRIAL-003","title":"[가상 예시] 새로운 면역치료제 E의 1상 연구","drug":"면역치료제 E","company":"예시 임상시험 의뢰자","condition":"고형암","status":"NOT_YET_RECRUITING","phases":["PHASE1"],"date":"2026-10-07","url":"https://clinicaltrials.gov/"}
+  ]
+}
