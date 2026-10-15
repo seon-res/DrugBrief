@@ -12,6 +12,7 @@ from email.utils import parsedate_to_datetime
 from html import unescape
 from html.parser import HTMLParser
 import hashlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,7 @@ import re
 import sys
 import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
@@ -35,6 +36,7 @@ EMA_FEEDS = [
     ('EMA 규제·절차 가이드라인', 'https://www.ema.europa.eu/en/regulatory-and-procedural-guideline.xml'),
     ('EMA 과학 가이드라인', 'https://www.ema.europa.eu/en/scientific-guidelines.xml'),
 ]
+NOTES = BASE / 'curated' / 'approval-notes.json'
 REGULATORY_WORDS = ('drug','pharmaceutical','biologic','biosimilar','clinical trial','gmp','cgmp','guidance',
                     'medicinal','manufactur','drug labeling','medication labeling','drug application','drug approval','pharmacovigilance',
                     '의약품','바이오','임상','허가','가이드라인','규제','실사','제조','약물')
@@ -91,6 +93,147 @@ def good_url(value):
     return str(value or '') if str(value or '').startswith(('https://', 'http://')) else ''
 
 
+
+def original_letter_link(submission):
+    """Return *only* an FDA original submission's approval letter, if discoverable.
+
+    OpenFDA sometimes lists multiple document types; a random document must not
+    be described as an approval letter.
+    """
+    for doc in submission.get('application_docs') or []:
+        if not isinstance(doc, dict):
+            continue
+        name = str(doc.get('applications_doc_title') or '')
+        typ = str(doc.get('applications_doc_type') or '')
+        link = good_url(doc.get('application_docs_url'))
+        # A Letter PDF on an approved original submission is generally the
+        # approval letter, but the document title must say Approval.
+        if 'approval' in (name + ' ' + typ).lower() and 'letter' in (name + ' ' + typ).lower() and link:
+            return link
+    return ''
+
+
+def approval_reason_fallback(record):
+    """Structured facts, not an inferred scientific/regulatory rationale."""
+    cls = str(record.get('classification') or '').strip()
+    form = str(record.get('dosage_form') or '').strip()
+    details = []
+    if cls:
+        details.append(f'FDA 제출 분류: {cls}')
+    if form:
+        details.append(f'허가 제품 제형: {form}')
+    return '. '.join(details) + ('. ' if details else '') + '구체적인 승인 대상·변경 내용은 FDA 원허가 승인서 확인이 필요합니다.'
+
+
+def read_curated_notes():
+    try:
+        raw = json.loads(NOTES.read_text(encoding='utf-8'))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    notes = {}
+    for row in raw if isinstance(raw, list) else []:
+        if not isinstance(row, dict):
+            continue
+        app = str(row.get('application') or '').upper().replace(' ', '')
+        date = iso_ymd(row.get('date'))
+        reason = str(row.get('reason_ko') or '').strip()
+        source = good_url(row.get('source_url'))
+        if re.fullmatch(r'(NDA|BLA)\d+', app) and date and reason and source:
+            notes[(app, date)] = row
+    return notes
+
+
+def apply_curated_reason(row, notes):
+    key = (str(row.get('application') or '').upper(), iso_ymd(row.get('date')))
+    note = notes.get(key)
+    if not note:
+        return False
+    row['approval_reason'] = str(note['reason_ko'])
+    row['reason_status'] = 'verified'
+    row['reason_basis'] = 'FDA 원허가 승인서 원문 확인'
+    row['reason_source_url'] = good_url(note['source_url'])
+    row['reason_verified_at'] = iso_ymd(note.get('verified_at'))
+    row['reason_category'] = str(note.get('category') or '')
+    if not row.get('approval_letter_url'):
+        row['approval_letter_url'] = row['reason_source_url']
+    return True
+
+
+def extract_letter_purpose(pdf_url):
+    """Conservative, non-AI extract from an official PDF, in English only.
+
+    This is explicitly tagged *automatic*, not 'FDA letter manually reviewed'.
+    No inferred Korean translation is produced from arbitrary letters.
+    """
+    host = (urlparse(pdf_url).hostname or '').lower()
+    if host != 'www.accessdata.fda.gov' or not urlparse(pdf_url).path.lower().endswith('.pdf'):
+        return ''
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        return ''
+    try:
+        blob = http_get(pdf_url, timeout=12, attempts=1)
+        if len(blob) > 8_000_000 or not blob.startswith(b'%PDF'):
+            return ''
+        reader = PdfReader(BytesIO(blob), strict=False)
+        text = ' '.join((page.extract_text() or '') for page in reader.pages[:2])
+        text = re.sub(r'\s+', ' ', text)
+        match = re.search(r'\bThis\s+(?:NDA|BLA)\s+provides\s+for\s+(.{30,800}?)'
+                          r'(?=\s+(?:APPROVAL\s*(?:&|AND)\s*LABELING|APPROVAL\s+AND\s+LABELING|'
+                          r'We\s+have\s+completed\s+our\s+review|CONTENT\s+OF\s+LABELING))',
+                          text, re.I)
+        if not match:
+            return ''
+        purpose = re.sub(r'\s+', ' ', match.group(1)).strip(' .;:')
+        # No content, too-long passages or unhelpful boilerplate rejected.
+        if len(purpose) > 650 or len(purpose) < 35:
+            return ''
+        return match.group(0).split(purpose)[0].strip() + ' ' + purpose + '.'
+    except Exception as exc:
+        print('WARN letter text unavailable:', str(exc)[:130], file=sys.stderr)
+        return ''
+
+
+def enrich_approval_reasons(rows, previous=None, max_pdf=12):
+    """Curated FDA-backed notes > previous exact-date explanations > auto extract > pending.
+
+    Never mark an automatically parsed letter as human verified.
+    """
+    notes = read_curated_notes()
+    before = {x.get('id'): x for x in (previous or []) if x.get('id')}
+    attempted = 0
+    for row in rows:
+        if not row.get('application', '').startswith(('NDA', 'BLA')):
+            continue
+        if apply_curated_reason(row, notes):
+            continue
+        old = before.get(row.get('id')) or {}
+        if (old.get('date') == row.get('date') and
+                old.get('reason_status') in ('verified', 'auto_extracted') and
+                old.get('approval_reason') and old.get('reason_source_url')):
+            for field in ('approval_reason','reason_status','reason_basis','reason_source_url',
+                          'reason_verified_at','reason_category'):
+                if field in old:
+                    row[field] = old[field]
+            if not row.get('approval_letter_url'):
+                row['approval_letter_url'] = old.get('approval_letter_url') or ''
+            continue
+        letter = row.get('approval_letter_url')
+        if letter and attempted < max_pdf:
+            attempted += 1
+            excerpt = extract_letter_purpose(letter)
+            if excerpt:
+                row.update({'approval_reason':excerpt,'reason_status':'auto_extracted',
+                            'reason_basis':'FDA 승인서 영문 문구 자동 추출 · 해석 검토 필요',
+                            'reason_source_url':letter})
+                continue
+        row.update({'approval_reason':approval_reason_fallback(row),
+                    'reason_status':'pending','reason_basis':'FDA 구조화 데이터 · 승인서 미검토',
+                    'reason_source_url':letter or row.get('url','')})
+    return rows
+
+
 def norm_fda_record(record, start='', end=''):
     """Return only NDA/BLA original approvals, not ANDA or supplements.
     Date range checked at submission level (API search matches parent application).
@@ -103,6 +246,7 @@ def norm_fda_record(record, start='', end=''):
     name = ', '.join(names[:3]) or ', '.join(openfda.get('brand_name') or []) or app
     ingredients = sorted({str(a.get('name') or '').strip() for p in products for a in (p.get('active_ingredients') or []) if a.get('name')})
     sponsor = str(record.get('sponsor_name') or '').strip()
+    forms = sorted({str(p.get('dosage_form') or '').strip() for p in products if p.get('dosage_form')})
     rows=[]
     for sub in record.get('submissions') or []:
         if str(sub.get('submission_type') or '').upper() != 'ORIG': continue
@@ -118,6 +262,8 @@ def norm_fda_record(record, start='', end=''):
             'company': sponsor, 'date': approved, 'application': app,
             'approval_type': 'BLA 원허가' if app.startswith('BLA') else 'NDA 원허가',
             'classification': str(sub.get('submission_class_code_description') or '').strip(),
+            'dosage_form': ', '.join(forms[:3]),
+            'approval_letter_url': original_letter_link(sub),
             'status': '승인',
             'description': f'FDA {app} original submission 승인 기록입니다. 적응증과 신규 유효성분 여부는 원문에서 별도로 확인하세요.',
             'url': f'https://www.accessdata.fda.gov/scripts/cder/daf/index.cfm?event=overview.process&ApplNo={appl_no}' if appl_no else 'https://www.accessdata.fda.gov/scripts/cder/daf/',
@@ -315,11 +461,16 @@ def run():
         try:
             fresh=func()
             if not fresh: raise RuntimeError('API returned no matching records')
+            if key == 'fda':
+                fresh = enrich_approval_reasons(fresh, previous=old)
             merged=current_snapshot(name,fresh,cap)
             status[key]={'state':'ok','last_success':started,'message':'수집 성공','count':len(fresh)}
             counts[key]=len(merged)
             print('OK',key, 'new',len(fresh),'total',len(merged),flush=True)
         except Exception as e:
+            if key == 'fda' and old:
+                enrich_approval_reasons(old, previous=old, max_pdf=0)
+                write_json(name, old)
             error = str(e)[:450]
             old_success=(previous.get(key) or {}).get('last_success')
             status[key]={'state':'stale' if old else 'error','last_success':old_success,

@@ -22,6 +22,52 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(data),1)
         self.assertEqual(data[0]['date'],'2026-01-12')
         self.assertEqual(norm_fda_record({**base,'application_number':'ANDA987654'}),[])
+    def test_approval_letter_link_only_approval(self):
+        good='https://www.accessdata.fda.gov/drugsatfda_docs/appletter/2026/220290Orig1s000ltr.pdf'
+        sub={'application_docs':[{'applications_doc_title':'Review', 'applications_doc_type':'Review', 'application_docs_url':'https://example.org/review.pdf'},
+                                 {'applications_doc_title':'Approval Letter', 'applications_doc_type':'Letter', 'application_docs_url':good}]}
+        self.assertEqual(update_data.original_letter_link(sub),good)
+        self.assertEqual(update_data.original_letter_link({'application_docs':[sub['application_docs'][0]]}), '')
+
+    def test_curated_breztri_requires_matching_application_and_date(self):
+        notes=update_data.read_curated_notes()
+        row={'application':'NDA220290','date':'2026-10-08','id':'FDA-NDA220290-1','title':'BREZTRI AEROSPHERE'}
+        update_data.enrich_approval_reasons([row], max_pdf=0)
+        self.assertEqual(row['reason_status'],'verified')
+        self.assertIn('HFO-1234ze(E)',row['approval_reason'])
+        self.assertIn('/220290Orig1s000ltr.pdf',row['reason_source_url'])
+        wrong={**row,'date':'2026-10-09'}
+        wrong.pop('approval_reason',None)
+        update_data.enrich_approval_reasons([wrong], max_pdf=0)
+        self.assertEqual(wrong['reason_status'],'pending')
+
+    def test_unreviewed_record_does_not_claim_letter_verified(self):
+        row={'id':'FDA-NDA900900-1','application':'NDA900900','date':'2026-10-02',
+             'classification':'Type 5','dosage_form':'TABLET','url':'https://www.accessdata.fda.gov/'}
+        update_data.enrich_approval_reasons([row],max_pdf=0)
+        self.assertEqual(row['reason_status'],'pending')
+        self.assertIn('승인서 확인이 필요합니다',row['approval_reason'])
+        self.assertNotIn('확인 완료',row['reason_basis'])
+
+    def test_original_record_has_document_details(self):
+        base={'application_number':'NDA220290','sponsor_name':'ASTRAZENECA',
+              'products':[{'brand_name':'BREZTRI AEROSPHERE','dosage_form':'AEROSOL, METERED'}],
+              'submissions':[{'submission_type':'ORIG','submission_status':'AP',
+                              'submission_status_date':'20261008','submission_number':'1',
+                              'application_docs':[{'applications_doc_title':'Approval Letter',
+                                'applications_doc_type':'Letter','application_docs_url':'https://www.accessdata.fda.gov/letter.pdf'}]}]}
+        row=norm_fda_record(base)[0]
+        self.assertEqual(row['dosage_form'],'AEROSOL, METERED')
+        self.assertEqual(row['approval_letter_url'],'https://www.accessdata.fda.gov/letter.pdf')
+
+    def test_automated_purpose_not_mislabeled_as_verified(self):
+        row={'id':'FDA-NDA900901-1','application':'NDA900901','date':'2026-10-04',
+             'approval_letter_url':'https://www.accessdata.fda.gov/letter.pdf'}
+        with patch.object(update_data,'extract_letter_purpose',return_value='This NDA provides for a new formulation.'):
+            update_data.enrich_approval_reasons([row],max_pdf=1)
+        self.assertEqual(row['reason_status'],'auto_extracted')
+        self.assertIn('자동 추출',row['reason_basis'])
+
     def test_trials_only_drugs(self):
         raw={'protocolSection':{'identificationModule':{'nctId':'NCT12345678','briefTitle':'Research test'},
              'designModule':{'studyType':'INTERVENTIONAL','phases':['PHASE3']},
