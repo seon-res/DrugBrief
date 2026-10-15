@@ -7,7 +7,7 @@ const TAB_INFO = {
 };
 const STATUS_KR={RECRUITING:'모집 중',NOT_YET_RECRUITING:'모집 예정',ACTIVE_NOT_RECRUITING:'진행 중·모집 종료',COMPLETED:'완료',TERMINATED:'중단',WITHDRAWN:'철회',SUSPENDED:'일시 중단',ENROLLING_BY_INVITATION:'초청 모집',UNKNOWN:'상태 미상'};
 const $ = q => document.querySelector(q);
-const state={tab:new URLSearchParams(location.search).get('tab')||'approvals',search:'',agency:'all',stage:'all',sort:'new',page:1,pageSize:15,history:false,historyData:null,data:{approvals:[],trials:[],regulations:[]},meta:{},selected:null};
+const state={tab:new URLSearchParams(location.search).get('tab')||'approvals',search:'',agency:'all',stage:'all',sort:'new',page:1,pageSize:15,historyData:null,regulationsCombined:null,historyLoading:false,historyError:'',data:{approvals:[],trials:[],regulations:[]},meta:{},selected:null};
 if(!TAB_INFO[state.tab])state.tab='approvals';
 const esc = s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const safeUrl = s=>{try{const u=new URL(String(s||''));return u.protocol==='https:'||u.protocol==='http:'?u.href:''}catch{return ''}};
@@ -20,12 +20,32 @@ async function dataLoad(path){
   if(!res.ok)throw Error(`${path}: HTTP ${res.status}`);
   return res.json();
 }
-function records(){return state.tab==='regulations'&&state.history&&state.historyData?combinedReg():state.data[state.tab]||[];}
-function combinedReg(){
-  const existing=state.data.regulations||[];
+function records(){
+  if(state.tab==='regulations')return state.regulationsCombined||state.data.regulations||[];
+  return state.data[state.tab]||[];
+}
+function combineAllRegulations(){
   const dict=new Map((state.historyData||[]).map(x=>[x.id,x]));
-  for(const x of existing)dict.set(x.id,x);
-  return [...dict.values()].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  for(const x of (state.data.regulations||[]))dict.set(x.id,x);
+  state.regulationsCombined=[...dict.values()].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+}
+async function ensureRegulationHistory(){
+  if(state.historyData||state.historyLoading)return;
+  state.historyLoading=true;
+  if(state.tab==='regulations')render();
+  try{
+    const items=await dataLoad('regulations-history.json');
+    if(!Array.isArray(items))throw Error('전체 아카이브 데이터 형식이 올바르지 않습니다.');
+    state.historyData=items;
+    combineAllRegulations();
+    state.historyError='';
+  }catch(e){
+    state.historyError=e.message||String(e);
+  }finally{
+    state.historyLoading=false;
+    state.page=1;
+    if(state.tab==='regulations')render();
+  }
 }
 function kindStatus(){
   if(state.tab==='approvals')return state.meta.sources?.fda;
@@ -46,7 +66,7 @@ function statCards(){
     const phase3=data.filter(x=>(x.phase||'').includes('Phase 3')).length;
     return [['조회된 임상시험',num(data.length),'최근 업데이트 샘플'],['모집 중·예정',num(active),'등록된 모집 상태'],['Phase 3',num(phase3),'3상 포함 연구'],['최근 변경 등록일',data[0]?.date||'—','승인일이 아닌 변경 게시일']];
   }
-  return [['규제 관련 기록',num(data.length),state.history?'과거 전체 + 최근':'최근 주요 자료'],['FDA 관련',num(data.filter(x=>x.agency?.includes('FDA')).length),'FDA / 연방관보'],['EMA 관련',num(data.filter(x=>x.agency==='EMA').length),'유럽 규제 자료'],['식약처 관련',num(data.filter(x=>x.agency==='식약처').length),'원본 ZIP 과거 기록']];
+  return [['규제 관련 기록',num(data.length),state.historyData?'2015년 이후 전체 아카이브 + 최신 자료':'전체 아카이브 자동 로드 중'],['FDA 관련',num(data.filter(x=>x.agency?.includes('FDA')).length),'FDA / 연방관보'],['EMA 관련',num(data.filter(x=>x.agency==='EMA').length),'유럽 규제 자료'],['식약처 관련',num(data.filter(x=>x.agency==='식약처').length),'원본 ZIP 과거 기록']];
 }
 function filterOptions(){
   const rows=records();
@@ -137,9 +157,13 @@ function extraNotice(){
   const s=kindStatus();
   if(s?.state==='pending'||s?.state==='error')return `<div class="alert warning">⚠️ <div><strong>${state.tab==='approvals'?'FDA':'임상시험'} 데이터가 아직 준비되지 않았습니다.</strong><br>GitHub 저장소의 Actions → DrugBrief 데이터 수집 및 배포 → Run workflow를 실행하세요. 다른 탭의 원본 규제 자료는 현재 열람할 수 있습니다.</div></div>`;
   if(s?.state==='stale')return `<div class="alert warning">⚠️ <div>최근 수집이 실패하여 <strong>마지막으로 저장된 자료</strong>를 보여주고 있습니다. 출처 상태와 날짜를 확인하세요.</div></div>`;
+  if(state.tab==='regulations' && state.historyError)return `<div class="alert warning">⚠️ <div>전체 규제 아카이브를 읽지 못했습니다. 최신 규제 기록만 표시 중입니다. (${esc(state.historyError)})</div></div>`;
+  if(state.tab==='regulations' && state.historyLoading)return `<div class="alert"><span class="spinner"></span><div>2015년부터의 규제 아카이브를 자동으로 불러오는 중입니다. 완료되면 체크 없이 전체 기록을 검색할 수 있습니다.</div></div>`;
   if(state.tab==='regulations')return `<div class="alert">ⓘ <div>규제 아카이브의 기존 자료는 <strong>2026-10-15 원본 ZIP 스냅샷</strong>입니다. 이후 Federal Register 및 EMA 갱신 자료가 합쳐집니다. 과거 기록은 원문으로 재확인하세요.</div></div>`;
   if(state.tab==='trials')return `<div class="alert">ⓘ <div><strong>최근 변경된 임상시험 표본</strong>을 보여줍니다. 전 세계 모든 임상시험의 전체 목록이나 신규 개시 건수를 의미하지 않습니다.</div></div>`;
-  return `<div class="alert">ⓘ <div>FDA의 <strong>NDA/BLA original approval</strong> 기록입니다. 이것이 모두 혁신 신약(NME)이나 신규 적응증 승인이라는 의미는 아닙니다.</div></div>`;
+  const coverage=state.meta.fda_coverage||{};
+  const coverageLabel=coverage.history_complete?'2015년 1월 1일부터 FDA 원허가 기록을 조회해 누적한 목록입니다.':'2015년부터 과거 FDA 원허가 기록을 수집하도록 업데이트되었습니다. 첫 배포 후 과거 자료 수집이 완료되어야 전체 기간이 표시됩니다.';
+  return `<div class="alert">ⓘ <div>${coverageLabel} 모든 NDA/BLA 원허가가 혁신 신약(NME)이나 신규 적응증 승인인 것은 아닙니다. 원본 API의 제공 범위·갱신 시점에 따라 누락될 수 있습니다.</div></div>`;
 }
 function aside(){
   const sourceLinks=state.tab==='approvals'?[['openFDA Drugs@FDA','https://open.fda.gov/apis/drug/drugsfda/'],['FDA Novel Drug Approvals','https://www.fda.gov/drugs/development-approval-process-drugs/novel-drug-approvals-fda']]:state.tab==='trials'?[['ClinicalTrials.gov','https://clinicaltrials.gov/'],['공식 API 문서','https://clinicaltrials.gov/data-api/api']]:[['FDA Federal Register','https://www.federalregister.gov/agencies/food-and-drug-administration'],['EMA RSS','https://www.ema.europa.eu/en/news-events/rss-feeds'],['식약처','https://www.mfds.go.kr/']];
@@ -166,7 +190,7 @@ function layout(){
    <div class="stats">${stats.map(([label,value,desc])=>`<div class="stat"><span class="stat-label">${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(desc)}</small></div>`).join('')}</div>
    ${extraNotice()}<div class="status-tags">${sourceStatuses()}</div>
    <div class="content-grid"><section class="panel"><div class="panel-header"><div class="panel-title">${esc(tab.name)} 목록</div><div class="panel-sub">기업명·의약품명·기관명·번호로 검색할 수 있습니다.</div>
-   ${state.tab==='regulations'?`<div class="archive-switch"><label for="full-history"><strong>전체 과거 규제 아카이브 열기</strong><br>원본 자료 약 ${num(state.meta.historic_total||6944)}건을 추가로 검색합니다. (최초 로딩 시 용량이 큽니다.)</label><input type="checkbox" id="full-history" ${state.history?'checked':''} /></div>`:''}
+   ${state.tab==='regulations'?`<div class="archive-switch"><div style="font-size:11px;color:#385a72"><strong>${state.historyData?'✓ 전체 규제 아카이브 검색 활성화':state.historyLoading?'전체 규제 아카이브 불러오는 중…':'전체 규제 아카이브 자동 검색'}</strong><br>${state.historyData?'2015년부터의 과거 기록 및 최신 자료를 체크 없이 모두 검색합니다.':state.historyError?'아카이브 로드에 실패하여 최신 목록만 표시합니다.':'과거 약 '+num(state.meta.historic_total||6944)+'건을 자동 로드합니다.'}</div></div>`:''}
    </div>
    <div class="filters"><label class="search"><span class="search-icon">⌕</span><input id="search" autocomplete="off" aria-label="통합 검색" placeholder="의약품·질환·기업·NCT 번호 또는 규제 키워드 검색" value="${esc(state.search)}"></label>
    <div class="filter-row"><select id="agency" aria-label="기관 선택">${s.agencies}</select><select id="stage" aria-label="세부 유형">${s.stage}</select><select id="sort" aria-label="정렬"><option value="new" ${state.sort==='new'?'selected':''}>최신순</option><option value="old" ${state.sort==='old'?'selected':''}>오래된 순</option></select></div></div>
@@ -175,7 +199,7 @@ function layout(){
    <footer class="page-footer"><div>DrugBrief · 공식 공공데이터 기반 학습·리서치용 정보 서비스<br>의약품 허가, 임상시험 상태 및 법규 변경 여부는 반드시 최신 공식 원문을 확인하세요.</div><div>규제 과거 데이터: 사용자 제공 <a href="https://github.com/nawoonkim423/pharma-regulation-site" target="_blank" rel="noopener noreferrer">pharma-regulation-site</a> 원본에서 재구성</div></footer>
    </main><div id="modal-root"></div>`;
 }
-function changeTab(tab){if(!TAB_INFO[tab])return;state.tab=tab;state.search='';state.stage='all';state.agency='all';state.page=1;state.sort='new';const p=new URLSearchParams(location.search);p.set('tab',tab);history.replaceState(null,'',location.pathname+'?'+p.toString());render();}
+function changeTab(tab){if(!TAB_INFO[tab])return;state.tab=tab;state.search='';state.stage='all';state.agency='all';state.page=1;state.sort='new';const p=new URLSearchParams(location.search);p.set('tab',tab);history.replaceState(null,'',location.pathname+'?'+p.toString());render();if(tab==='regulations')ensureRegulationHistory();}
 function openModal(id){
   const item=records().find(x=>x.id===id);if(!item)return;
   state.selected=id;
@@ -197,15 +221,7 @@ function csvDownload(){
   const file=new Blob(['\ufeff'+lines.join('\r\n')],{type:'text/csv;charset=utf-8'});
   const url=URL.createObjectURL(file);const a=document.createElement('a');a.href=url;a.download=`DrugBrief_${state.tab}_${new Date().toISOString().slice(0,10)}.csv`;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
 }
-async function loadHistory(checked){
-  state.history=checked;
-  if(checked&&!state.historyData){
-    const old=$('#full-history');if(old)old.disabled=true;
-    try {state.historyData=await dataLoad('regulations-history.json');}
-    catch(e){alert('아카이브를 불러오지 못했습니다: '+e.message);state.history=false;}
-  }
-  state.page=1;render();
-}
+
 function render(focusSearch=false){
   const active=focusSearch ? [$('#search')?.selectionStart,$('#search')?.selectionEnd]:null;
   $('#app').innerHTML=layout();
@@ -219,14 +235,13 @@ function render(focusSearch=false){
   $('#export-csv')?.addEventListener('click',csvDownload);
   $('#prev-page')?.addEventListener('click',()=>{state.page--;render();$('.content-grid')?.scrollIntoView({behavior:'smooth'});});
   $('#next-page')?.addEventListener('click',()=>{state.page++;render();$('.content-grid')?.scrollIntoView({behavior:'smooth'});});
-  $('#full-history')?.addEventListener('change',e=>loadHistory(e.target.checked));
   document.querySelectorAll('[data-detail]').forEach(btn=>btn.addEventListener('click',()=>openModal(btn.dataset.detail)));
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
 (async()=>{
   try{
     const [a,t,r,m]=await Promise.all([dataLoad('approvals.json'),dataLoad('trials.json'),dataLoad('regulations.json'),dataLoad('metadata.json')]);
-    state.data={approvals:a,trials:t,regulations:r};state.meta=m;render();
+    state.data={approvals:a,trials:t,regulations:r};state.meta=m;render();if(state.tab==='regulations')ensureRegulationHistory();
   }catch(e){
     $('#app').innerHTML=`<div class="container" style="padding-top:75px"><h1>데이터를 불러오지 못했습니다.</h1><p>${esc(e.message)}</p><p>파일을 직접 더블클릭해서 열었다면 브라우저에서 JSON을 차단할 수 있습니다. README의 로컬 서버 실행법을 참고하거나 GitHub Pages로 배포해 주세요.</p></div>`;
   }

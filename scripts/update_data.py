@@ -37,6 +37,9 @@ EMA_FEEDS = [
     ('EMA 과학 가이드라인', 'https://www.ema.europa.eu/en/scientific-guidelines.xml'),
 ]
 NOTES = BASE / 'curated' / 'approval-notes.json'
+FDA_HISTORY_START = '2015-01-01'
+FDA_FULL_RECHECK_DAYS = 30
+FDA_RECENT_RECHECK_DAYS = 180
 REGULATORY_WORDS = ('drug','pharmaceutical','biologic','biosimilar','clinical trial','gmp','cgmp','guidance',
                     'medicinal','manufactur','drug labeling','medication labeling','drug application','drug approval','pharmacovigilance',
                     '의약품','바이오','임상','허가','가이드라인','규제','실사','제조','약물')
@@ -273,37 +276,73 @@ def norm_fda_record(record, start='', end=''):
     return rows
 
 
-def fetch_approvals(days=240, now=None):
+def approval_scan_start(info, today):
+    """Initial one-time historical backfill, then incremental recent refresh.
+
+    Recheck the full history every 30 days to catch late corrections/backdated
+    FDA entries. Never mark coverage complete until *every* window succeeds.
+    """
+    coverage = info.get('fda_coverage') or {}
+    previous = iso_ymd(coverage.get('last_full_scan_date'))
+    complete = bool(coverage.get('history_complete')) and coverage.get('start_date') == FDA_HISTORY_START
+    full_due = not complete or not previous
+    if not full_due:
+        try:
+            full_due = (today - datetime.strptime(previous, '%Y-%m-%d').date()).days >= FDA_FULL_RECHECK_DAYS
+        except ValueError:
+            full_due = True
+    if full_due:
+        return FDA_HISTORY_START, True
+    start = today - timedelta(days=FDA_RECENT_RECHECK_DAYS)
+    return max(start.isoformat(), FDA_HISTORY_START), False
+
+
+def fetch_approvals(start_date=FDA_HISTORY_START, now=None):
+    """Fetch FDA NDA/BLA original approvals within a bounded date range.
+
+    API returns *applications*, sometimes with many separate submissions.
+    Apply original-approval and precise date validation per submission after
+    querying; do not mistake a supplement date for original approval date.
+    """
     today = (now or datetime.now(UTC)).date()
-    begin = today - timedelta(days=days)
+    start_date = iso_ymd(start_date)
+    if not start_date:
+        raise ValueError('FDA start_date must be YYYY-MM-DD')
+    begin = datetime.strptime(start_date,'%Y-%m-%d').date()
+    if begin > today:
+        raise ValueError('FDA approval start is later than today')
     found = {}
-    # Limit cross-nested application matches by splitting into ~60-day windows and NDA/BLA groups.
-    for prefix in ('NDA', 'BLA'):
+    for prefix in ('NDA','BLA'):
         window_end = today
         while window_end >= begin:
+            # Small windows avoid openFDA deep paging and cross-submission matches.
             window_start = max(begin, window_end - timedelta(days=59))
             query = (f'application_number:{prefix}* AND submissions.submission_type:ORIG '
                      f'AND submissions.submission_status:AP AND submissions.submission_status_date:'
                      f'[{window_start:%Y%m%d} TO {window_end:%Y%m%d}]')
             limit, skip = 500, 0
-            while skip <= 4500:
+            while True:
                 try:
-                    payload = api_json(FDA_API, {'search': query, 'limit': limit, 'skip': skip})
+                    payload = api_json(FDA_API, {'search':query, 'limit':limit, 'skip':skip})
                 except RuntimeError as err:
                     if isinstance(err.__cause__, HTTPError) and err.__cause__.code == 404:
-                        break  # openFDA uses HTTP 404 for zero matching applications
+                        break  # openFDA returns 404 on an empty search window.
                     raise
                 entries = payload.get('results') or []
                 for record in entries:
-                    for item in norm_fda_record(record, window_start.isoformat(), window_end.isoformat()):
+                    for item in norm_fda_record(record,window_start.isoformat(),window_end.isoformat()):
                         found[item['id']] = item
-                total = (payload.get('meta') or {}).get('results',{}).get('total',0)
-                if not entries or skip+len(entries) >= total: break
+                total = int(((payload.get('meta') or {}).get('results') or {}).get('total') or 0)
+                if not entries or skip+len(entries) >= total:
+                    break
                 skip += len(entries)
-                time.sleep(.15)
+                if skip > 25000:
+                    raise RuntimeError('openFDA skip 제한 도달: 조회 기간을 더 나눠야 합니다.')
+                time.sleep(.12)
             window_end = window_start - timedelta(days=1)
-    if not found: raise RuntimeError('조회 기간 내 NDA/BLA 원허가 데이터를 찾지 못했습니다. FDA API 응답 조건을 확인하세요.')
-    return sorted(found.values(), key=lambda a:(a['date'],a['id']), reverse=True)[:250]
+    if not found:
+        raise RuntimeError('조회 기간 내 NDA/BLA 원허가 데이터가 없습니다. FDA API 조건을 확인하세요.')
+    return sorted(found.values(),key=lambda a:(a['date'],a['id']),reverse=True)
 
 
 def norm_trial(study):
@@ -432,12 +471,13 @@ def fetch_ema():
     return out
 
 
-def current_snapshot(name, current, item_cap):
+def current_snapshot(name, current, item_cap=None):
     # Merge new and previous records; keep last successful history to avoid blinking on subsequent runs.
     before=read_json(name, [])
     byid={str(it.get('id')):it for it in before if it.get('id')}
     byid.update({str(it['id']):it for it in current if it.get('id')})
-    out=sorted(byid.values(),key=lambda x:(x.get('date') or '',x.get('id') or ''),reverse=True)[:item_cap]
+    out=sorted(byid.values(),key=lambda x:(x.get('date') or '',x.get('id') or ''),reverse=True)
+    if item_cap is not None: out=out[:item_cap]
     write_json(name,out)
     return out
 
@@ -450,13 +490,15 @@ def run():
     counts={}
     started=now_iso()
     jobs = [
-        ('fda','approvals.json',lambda:fetch_approvals(),250),
+        ('fda','approvals.json',None,None),
         ('trials','trials.json',lambda:fetch_trials(),300),
         ('federal_register','regulations-live-fda.json',fetch_federal_register,250),
         ('ema','regulations-live-ema.json',fetch_ema,250),
     ]
+    start_scan, is_full_scan = approval_scan_start(info, datetime.now(UTC).date())
+    jobs[0] = ('fda','approvals.json',lambda:fetch_approvals(start_date=start_scan),None)
     for key,name,func,cap in jobs:
-        print('FETCH',key, flush=True)
+        print('FETCH',key, f'from {start_scan}' if key == 'fda' else '',flush=True)
         old=read_json(name,[])
         try:
             fresh=func()
@@ -466,6 +508,14 @@ def run():
             merged=current_snapshot(name,fresh,cap)
             status[key]={'state':'ok','last_success':started,'message':'수집 성공','count':len(fresh)}
             counts[key]=len(merged)
+            if key == 'fda':
+                prior_coverage = dict(info.get('fda_coverage') or {})
+                if is_full_scan:
+                    prior_coverage['last_full_scan_date'] = datetime.now(UTC).date().isoformat()
+                    prior_coverage['history_complete'] = True
+                prior_coverage.update({'start_date':FDA_HISTORY_START, 'last_scan_start':start_scan,
+                                       'last_scan_at':started, 'stored_record_count':len(merged)})
+                info['fda_coverage'] = prior_coverage
             print('OK',key, 'new',len(fresh),'total',len(merged),flush=True)
         except Exception as e:
             if key == 'fda' and old:

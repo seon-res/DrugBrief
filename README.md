@@ -4,9 +4,9 @@ FDA 의약품 허가 기록, ClinicalTrials.gov의 임상시험 등록정보, FD
 
 ## 🧭 세 가지 메뉴
 
-1. **신규 의약품 허가·FDA 승인:** `openFDA Drugs@FDA`의 `NDA`/`BLA` 신청에 대한 original submission 승인(`ORIG` + `AP`) 기록. 보완 신청(`SUPPL`)과 제네릭 신청(`ANDA`)은 제외합니다. **이 목록은 FDA Novel Drug Approvals(NME/신규 생물학적 제제) 목록과 동일하지 않습니다.** 최근 240일간 확인한 결과 최대 250건을 보여 줍니다.
+1. **신규 의약품 허가·FDA 승인:** `openFDA Drugs@FDA`의 `NDA`/`BLA` 신청에 대한 original submission 승인(`ORIG` + `AP`) 기록. 보완 신청(`SUPPL`)과 제네릭 신청(`ANDA`)은 제외합니다. **이 목록은 FDA Novel Drug Approvals(NME/신규 생물학적 제제) 목록과 동일하지 않습니다.** 2015-01-01부터 현재까지의 원허가 기록을 최초 실행에 백필(backfill)하고, 그 이후에는 최근 180일분을 매일 갱신합니다. 매 30일마다 2015년 이후 전체 범위를 재확인합니다. 250건 표시 제한은 없습니다.
 2. **임상시험 진행 현황:** ClinicalTrials.gov API v2에서 최근 변경된 중재시험 중 등록된 중재가 DRUG 또는 BIOLOGICAL인 자료 최대 200건. Phase, 상태, 개발사, 질환명, NCT 번호를 확인합니다. 이는 전체 임상시험 수가 아닌 최근 변경 기록의 표본입니다.
-3. **제약 규제·가이드라인 변경:** FDA 연방관보 API, EMA 규제·과학 가이드라인 RSS, 기존 `pharma-regulation-site` ZIP에서 추출한 아카이브를 검색할 수 있습니다. **식약처 과거 자료의 자동 신규 수집은 이 버전에 포함되지 않습니다.** 식약처 항목은 사용자 제공 원본에 저장된 2026-10-15 스냅샷입니다. 공식 사이트를 통해 이후 개정 사항을 확인해 주세요.
+3. **제약 규제·가이드라인 변경:** FDA 연방관보 API, EMA 규제·과학 가이드라인 RSS, 기존 `pharma-regulation-site` ZIP에서 추출한 아카이브를 검색할 수 있습니다. **규제 탭을 열면 2015년부터의 아카이브 전체가 자동으로 로드되며, 체크박스를 선택할 필요가 없습니다.** **식약처 과거 자료의 자동 신규 수집은 이 버전에 포함되지 않습니다.** 식약처 항목은 사용자 제공 원본에 저장된 2026-10-15 스냅샷입니다. 공식 사이트를 통해 이후 개정 사항을 확인해 주세요.
 
 FDA 승인 메뉴에는 승인서 확인 완료·승인서 영문 자동 발췌·승인 사유 확인 필요를 구분한 요약이 표시됩니다. PDF 발췌용 `pypdf`는 자동화가 선택적으로 설치하며, 설치 실패 시에도 자료 수집과 배포는 계속됩니다. 각 데이터 행에는 공식 출처 링크가 제공되며, 제목 클릭 → 상세 정보, 검색 필터링 및 CSV 다운로드를 이용할 수 있습니다.
 
@@ -77,7 +77,7 @@ DrugBrief-upgraded/
 ├── data/trials.json                        # 임상시험 정보
 ├── data/regulations.json                   # 규제 통합 목록
 ├── data/regulations-archive.json           # 원본 ZIP 중 주요 규제 문서
-├── data/regulations-history.json           # 원본 ZIP의 전체 규제 기록 6,944건
+├── data/regulations-history.json           # 원본 ZIP의 전체 규제 기록 6,944건 (최초 기록 2015-04-08)
 ├── data/regulations-live-fda.json          # FDA 연방관보 업데이트
 ├── data/regulations-live-ema.json          # EMA 가이드라인 RSS
 ├── data/metadata.json                      # 수집 상태/성공 시각
@@ -115,3 +115,13 @@ DrugBrief-upgraded/
 직접 승인 내용을 더 추가할 때는 `curated/approval-notes.json`의 다른 객체와 같은 형식으로 `application`, `date`, `reason_ko`, `source_url`, `verified_at`을 넣으면 됩니다. 출처와 승인일이 없는 수동 요약은 시스템이 승인서 검토 완료로 표시하지 않습니다. 데이터 수집이 실행될 때마다 같은 신청번호와 날짜에 있는 요약이 자동 반영됩니다.
 
 개별 승인서가 openFDA에 연결되지 않은 경우, 정확한 문서 URL을 확인한 뒤 수동 기록으로 추가하세요. GitHub에 코드를 다시 올린 후 Actions에서 수동 실행하거나 예약 실행을 기다리면 됩니다.
+
+
+## 2026-10-15 전체 규제 검색 및 2015년부터 FDA 승인 기록 확대
+
+- **규제 아카이브:** `assets/app.js`는 규제 탭 진입 시 `data/regulations-history.json`(원본 6,944건)을 자동으로 읽고, `data/regulations.json`의 최신 수집 자료와 ID 기준으로 중복을 제거합니다. 기존 체크박스를 제거했습니다. 과거 JSON은 약 6.6MB이므로 첫 로딩에서 잠시 기다려야 할 수 있습니다. 로드 실패 시 오류를 화면에 표시하고 최신 목록으로 검색을 계속합니다.
+- **FDA 기간:** 사용자 제공 규제 데이터에서 가장 오래된 날짜는 2015-04-08이므로 시작 연도를 일치시켜 `2015-01-01`부터 NDA/BLA Original approval을 검색합니다. 과거 기록은 FDA API 기준이므로 규제 기록의 6,944건과는 전혀 다른 모집단입니다.
+- **수집 방식:** 첫 성공 시 전 기간(2015~현재)을 조회하고 `data/metadata.json`의 `fda_coverage.history_complete`에 기록합니다. 이후 매일 최근 180일을 재수집하여 과거 기록에 누적하며, 30일마다 전체 역사를 재확인합니다. 과거 수집이 실패하면 기존 기록을 보존하고 다음 실행에 다시 전 기간 조회를 시도합니다. **외부 API의 모든 기록을 빠짐없이 수집했다고 보증하지 않습니다.**
+- **통계:** 원본 기록의 NDA 및 BLA 승인 횟수를 표시합니다. 보완허가(SUPPL)와 ANDA는 제외됩니다. 기간 제한을 제거해도 실제 건수는 API 자료 상태와 승인 유형에 따라 달라집니다.
+- **기존 정보:** 이미 저장된 `data/approvals.json`, `data/regulations-history.json`, `curated/approval-notes.json`, NDA 한국어 요약은 삭제하거나 덮어쓰지 않습니다. 이번 패치에는 데이터 파일이 포함되지 않습니다.
+- **배포:** 아래 ZIP의 `assets/app.js`, `scripts/update_data.py`, `tests/test_pipeline.py`, `README.md`만 기존 경로로 업로드합니다. 기존 `.github/workflows/drugbrief-deploy.yml`을 변경할 필요는 없습니다. `main` 브랜치에 커밋하면 GitHub Actions가 자동 실행됩니다. 첫 과거 FDA 수집은 여러 API 호출이 필요하여 평소보다 오래 걸릴 수 있습니다.

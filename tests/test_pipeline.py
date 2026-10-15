@@ -30,16 +30,46 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(update_data.original_letter_link({'application_docs':[sub['application_docs'][0]]}), '')
 
     def test_curated_breztri_requires_matching_application_and_date(self):
-        notes=update_data.read_curated_notes()
-        row={'application':'NDA220290','date':'2026-10-08','id':'FDA-NDA220290-1','title':'BREZTRI AEROSPHERE'}
-        update_data.enrich_approval_reasons([row], max_pdf=0)
-        self.assertEqual(row['reason_status'],'verified')
-        self.assertIn('HFO-1234ze(E)',row['approval_reason'])
-        self.assertIn('/220290Orig1s000ltr.pdf',row['reason_source_url'])
-        wrong={**row,'date':'2026-10-09'}
-        wrong.pop('approval_reason',None)
-        update_data.enrich_approval_reasons([wrong], max_pdf=0)
-        self.assertEqual(wrong['reason_status'],'pending')
+        note={'reason_ko':'신규 추진제 HFO-1234ze(E)를 사용한 제형',
+              'source_url':'https://www.accessdata.fda.gov/drugsatfda_docs/appletter/2026/220290Orig1s000ltr.pdf',
+              'verified_at':'2026-10-15'}
+        notes={('NDA220290','2026-10-08'):note}
+        with patch.object(update_data,'read_curated_notes',return_value=notes):
+            row={'application':'NDA220290','date':'2026-10-08','id':'FDA-NDA220290-1','title':'BREZTRI AEROSPHERE'}
+            update_data.enrich_approval_reasons([row],max_pdf=0)
+            self.assertEqual(row['reason_status'],'verified')
+            self.assertIn('HFO-1234ze(E)',row['approval_reason'])
+            self.assertIn('/220290Orig1s000ltr.pdf',row['reason_source_url'])
+            wrong={**row,'date':'2026-10-09'}
+            wrong.pop('approval_reason',None)
+            update_data.enrich_approval_reasons([wrong],max_pdf=0)
+            self.assertEqual(wrong['reason_status'],'pending')
+
+    def test_full_backfill_starts_in_2015_and_rescans_monthly(self):
+        from datetime import date
+        now=date(2026,10,15)
+        self.assertEqual(update_data.approval_scan_start({},now),('2015-01-01',True))
+        info={'fda_coverage':{'history_complete':True,'start_date':'2015-01-01','last_full_scan_date':'2026-10-14'}}
+        start,full=update_data.approval_scan_start(info,now)
+        self.assertEqual((start,full),('2026-04-18',False))
+        older={'fda_coverage':{**info['fda_coverage'],'last_full_scan_date':'2026-09-01'}}
+        self.assertEqual(update_data.approval_scan_start(older,now),('2015-01-01',True))
+
+    def test_fda_fetch_is_not_capped_at_250(self):
+        from datetime import datetime,timezone
+        applications=[]
+        for n in range(300):
+            applications.append({'application_number':f'NDA{n+200000}',
+              'products':[{'brand_name':f'Drug {n}'}],
+              'submissions':[{'submission_type':'ORIG','submission_status':'AP',
+                             'submission_status_date':'20261010','submission_number':'1'}]})
+        def response(_url,params):
+            return {'results':applications if 'NDA' in params['search'] else [],
+                    'meta':{'results':{'total':300 if 'NDA' in params['search'] else 0}}}
+        with patch.object(update_data,'api_json',side_effect=response):
+            rows=update_data.fetch_approvals('2026-10-01',now=datetime(2026,10,15,tzinfo=timezone.utc))
+        self.assertEqual(len(rows),300)
+
 
     def test_unreviewed_record_does_not_claim_letter_verified(self):
         row={'id':'FDA-NDA900900-1','application':'NDA900900','date':'2026-10-02',
