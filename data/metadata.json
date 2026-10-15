@@ -1,0 +1,36 @@
+{
+  "updated_at": null,
+  "sources": {
+    "fda": {
+      "state": "pending",
+      "last_success": null,
+      "message": "첫 수집 대기",
+      "count": 0
+    },
+    "trials": {
+      "state": "pending",
+      "last_success": null,
+      "message": "첫 수집 대기",
+      "count": 0
+    },
+    "federal_register": {
+      "state": "pending",
+      "last_success": null,
+      "message": "첫 수집 대기",
+      "count": 0
+    },
+    "ema": {
+      "state": "pending",
+      "last_success": null,
+      "message": "첫 수집 대기",
+      "count": 0
+    }
+  },
+  "counts": {
+    "fda": 0,
+    "trials": 0
+  },
+  "historic_total": 6944,
+  "historic_as_of": "2026-10-15",
+  "note": "초기 ZIP에는 원본 규제 과거 데이터만 있습니다. GitHub Actions 실행 후 실시간 API 데이터를 수집합니다."
+}
