@@ -26,6 +26,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Optional FDA approval letter PDF reader
+        continue-on-error: true
+        run: python -m pip install 'pypdf>=5,<7'
       - name: Run offline tests
         run: python -m unittest discover -s tests -v
       - name: Fetch official FDA, ClinicalTrials.gov, Federal Register and EMA data
